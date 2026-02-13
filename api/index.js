@@ -1,5 +1,6 @@
 // api/index.js
-// B计划：切换至酷狗音乐 (Kugou)，无需 Key，IP 限制少，MP3 连接稳定
+// 最终版：切换至咪咕音乐 (Migu)
+// 优势：周杰伦的歌在咪咕很多是免费的，不需要 VIP 也能拿链接
 
 export default async function handler(request, response) {
   const { keyword } = request.query;
@@ -9,54 +10,42 @@ export default async function handler(request, response) {
   }
 
   try {
-    // 1. 搜索歌曲 (获取 Hash 值)
-    const searchUrl = `http://mobilecdn.kugou.com/api/v3/search/song?format=json&keyword=${encodeURIComponent(keyword)}&page=1&pagesize=5&showtype=1`;
+    // 1. 请求咪咕的公开搜索接口
+    const searchUrl = `https://m.music.migu.cn/migu/remoting/scr_search_tag?rows=10&type=2&keyword=${encodeURIComponent(keyword)}&pgc=1`;
     
-    const searchRes = await fetch(searchUrl);
-    const searchData = await searchRes.json();
-    
-    // 如果没搜到
-    if (!searchData.data || !searchData.data.info) {
-      return response.status(200).json({ code: 200, msg: "Kugou: No songs found", data: [] });
-    }
-
-    const rawSongs = searchData.data.info;
-
-    // 2. 并发获取 MP3 链接 (酷狗需要用 Hash 换链接)
-    // 我们同时请求 5 首歌，速度很快
-    const tasks = rawSongs.map(async (song) => {
-      try {
-        // 请求详情接口
-        const detailUrl = `https://www.kugou.com/yy/index.php?r=play/getdata&hash=${song.hash}`;
-        // 加个简单的 Cookie 防止被拦截
-        const detailRes = await fetch(detailUrl, {
-          headers: { 'Cookie': 'kg_mid=2333' } 
-        });
-        const detailData = await detailRes.json();
-
-        // 只有拿到了真实的播放链接才返回
-        if (detailData.data && detailData.data.play_url) {
-          return {
-            name: song.songname,      // 歌名
-            singer: song.singername,  // 歌手
-            pic: detailData.data.img, // 封面
-            url: detailData.data.play_url, // 真实的 MP3 链接
-            lrc: detailData.data.lyrics    // 歌词
-          };
-        }
-        return null;
-      } catch (e) {
-        return null;
+    const res = await fetch(searchUrl, {
+      headers: {
+        'Referer': 'https://m.music.migu.cn/',
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1'
       }
     });
+    
+    const json = await res.json();
 
-    // 等待所有请求完成，并过滤掉失败的
-    const results = (await Promise.all(tasks)).filter(item => item !== null);
+    // 2. 检查结果
+    if (!json.musics) {
+      return response.status(200).json({ code: 200, msg: "Migu: No songs found", data: [] });
+    }
+
+    // 3. 清洗数据 (咪咕直接返回 mp3 链接，非常爽)
+    const cleanList = json.musics.map(song => {
+      // 只有当有 mp3 链接时才返回
+      if (song.mp3) {
+        return {
+          name: song.songName,
+          singer: song.singerName,
+          pic: song.cover,
+          url: song.mp3, // 咪咕直接送了 mp3 链接
+          lrc: ""        // 咪咕歌词格式比较复杂，先置空
+        };
+      }
+      return null;
+    }).filter(item => item !== null); // 过滤掉无效的
 
     response.status(200).json({
       code: 200,
-      msg: "Success (Kugou)",
-      data: results
+      msg: "Success (Migu)",
+      data: cleanList
     });
 
   } catch (error) {
