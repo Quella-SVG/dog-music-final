@@ -1,55 +1,65 @@
 // api/index.js
-// 增强版：使用 cloudsearch 接口 + 伪造 Cookie
+// B计划：切换至酷狗音乐 (Kugou)，无需 Key，IP 限制少，MP3 连接稳定
 
 export default async function handler(request, response) {
   const { keyword } = request.query;
 
-  // 1. 如果没有关键词，返回提示
   if (!keyword) {
-    return response.status(200).json({ code: 404, msg: "请在网址后面加上 ?keyword=歌名", data: [] });
+    return response.status(200).json({ code: 404, msg: "No keyword", data: [] });
   }
 
   try {
-    // 2. 换用 cloudsearch 接口，这个接口比之前的更稳定
-    const targetUrl = `http://music.163.com/api/cloudsearch/pc?s=${encodeURIComponent(keyword)}&type=1&offset=0&limit=5`;
+    // 1. 搜索歌曲 (获取 Hash 值)
+    const searchUrl = `http://mobilecdn.kugou.com/api/v3/search/song?format=json&keyword=${encodeURIComponent(keyword)}&page=1&pagesize=5&showtype=1`;
     
-    const res = await fetch(targetUrl, {
-      method: 'POST', // 改用 POST 方式，甚至不需要 body，有时能骗过防火墙
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': 'http://music.163.com/',
-        'Cookie': 'os=pc; osver=Microsoft-Windows-10-Professional-build-10586-64bit; appver=2.0.3.131777; channel=netease;'
-      }
-    });
+    const searchRes = await fetch(searchUrl);
+    const searchData = await searchRes.json();
     
-    const data = await res.json();
-
-    // 3. 检查结果
-    if (!data.result || !data.result.songs) {
-      // 如果还是空的，尝试打印一下具体原因（调试用）
-      console.log("网易云返回数据异常:", JSON.stringify(data));
-      return response.status(200).json({ code: 200, msg: "No songs found (IP可能是被限制了，请稍后再试)", data: [] });
+    // 如果没搜到
+    if (!searchData.data || !searchData.data.info) {
+      return response.status(200).json({ code: 200, msg: "Kugou: No songs found", data: [] });
     }
 
-    // 4. 清洗数据
-    const cleanList = data.result.songs.map(song => {
-      return {
-        name: song.name,
-        singer: song.ar ? song.ar.map(a => a.name).join('/') : "未知歌手",
-        pic: song.al ? song.al.picUrl : "",
-        // MP3 直链
-        url: `http://music.163.com/song/media/outer/url?id=${song.id}.mp3`,
-        lrc: ""
-      };
+    const rawSongs = searchData.data.info;
+
+    // 2. 并发获取 MP3 链接 (酷狗需要用 Hash 换链接)
+    // 我们同时请求 5 首歌，速度很快
+    const tasks = rawSongs.map(async (song) => {
+      try {
+        // 请求详情接口
+        const detailUrl = `https://www.kugou.com/yy/index.php?r=play/getdata&hash=${song.hash}`;
+        // 加个简单的 Cookie 防止被拦截
+        const detailRes = await fetch(detailUrl, {
+          headers: { 'Cookie': 'kg_mid=2333' } 
+        });
+        const detailData = await detailRes.json();
+
+        // 只有拿到了真实的播放链接才返回
+        if (detailData.data && detailData.data.play_url) {
+          return {
+            name: song.songname,      // 歌名
+            singer: song.singername,  // 歌手
+            pic: detailData.data.img, // 封面
+            url: detailData.data.play_url, // 真实的 MP3 链接
+            lrc: detailData.data.lyrics    // 歌词
+          };
+        }
+        return null;
+      } catch (e) {
+        return null;
+      }
     });
+
+    // 等待所有请求完成，并过滤掉失败的
+    const results = (await Promise.all(tasks)).filter(item => item !== null);
 
     response.status(200).json({
       code: 200,
-      msg: "Success",
-      data: cleanList
+      msg: "Success (Kugou)",
+      data: results
     });
 
   } catch (error) {
-    response.status(500).json({ error: "服务器内部错误: " + error.message });
+    response.status(500).json({ error: "Server Error: " + error.message });
   }
 }
